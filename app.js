@@ -1,5 +1,4 @@
 // --- Minimal RefillRadar App (No Onboarding, No Username) ---
-// Assumes new index.html and styles.css layout
 
 let userLatLng = null;
 let map = null;
@@ -11,13 +10,11 @@ let showSingleCardIdx = null;
 const KARLSRUHE_BOUNDS = { minLat: 48.9, maxLat: 49.2, minLon: 8.2, maxLon: 8.6 };
 const KIT_UNI = { lat: 49.0128, lng: 8.4178, name: 'KIT University' };
 
-// --- DOM Elements ---
 const langSwitchApp = document.getElementById('langSwitchApp');
 const locateBtn = document.getElementById('locateBtn');
 const statusMessage = document.getElementById('statusMessage');
 const cardsList = document.getElementById('cardsList');
 
-// --- Language ---
 const LANGUAGES = {
   en: {
     greeting: (time) => `${time}!`,
@@ -54,11 +51,9 @@ const LANGUAGES = {
 };
 let lang = localStorage.getItem('lang') || 'en';
 
-// --- App Init ---
 window.addEventListener('DOMContentLoaded', () => {
   setThemeByTime();
   getUserLocationAndInit();
-  // --- Language Switcher Toggle ---
   langSwitchApp.addEventListener('click', e => {
     if (e.target.tagName === 'BUTTON' && e.target.dataset.lang) {
       setLanguage(e.target.dataset.lang);
@@ -76,15 +71,10 @@ function setLanguage(newLang) {
   localStorage.setItem('lang', lang);
   renderCards();
 }
-function getGreetingTime() {
-  const hour = new Date().getHours();
-  const t = LANGUAGES[lang].times.find(t => hour >= t.from && hour < t.to);
-  return t ? t.text : '';
-}
+
 function setThemeByTime() {
   const hour = new Date().getHours();
   if (hour < 7 || hour > 20) {
-    // Dark theme
     document.body.style.setProperty('--theme-bg', '#1a2233');
     document.body.style.setProperty('--theme-text', '#ffffff');
     document.body.style.setProperty('--theme-text-secondary', '#b0b8c1');
@@ -100,7 +90,6 @@ function setThemeByTime() {
     document.body.style.setProperty('--theme-status-bg', '#2d3748');
     document.body.style.setProperty('--theme-status-text', '#f7fafc');
   } else {
-    // Light theme
     document.body.style.setProperty('--theme-bg', '#eaf6fb');
     document.body.style.setProperty('--theme-text', '#222222');
     document.body.style.setProperty('--theme-text-secondary', '#666666');
@@ -117,6 +106,9 @@ function setThemeByTime() {
     document.body.style.setProperty('--theme-status-text', '#856404');
   }
 }
+
+
+
 function getUserLocationAndInit() {
   if (!navigator.geolocation) {
     useMockLocation();
@@ -124,15 +116,12 @@ function getUserLocationAndInit() {
   }
   navigator.geolocation.getCurrentPosition(
     pos => {
-      let lat = pos.coords.latitude;
-      let lng = pos.coords.longitude;
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
       const isInKarlsruhe = lat > KARLSRUHE_BOUNDS.minLat && lat < KARLSRUHE_BOUNDS.maxLat && lng > KARLSRUHE_BOUNDS.minLon && lng < KARLSRUHE_BOUNDS.maxLon;
-      if (!isInKarlsruhe) {
-        useMockLocation();
-      } else {
-        userLatLng = { lat, lng };
-        initMap();
-      }
+      userLatLng = isInKarlsruhe ? { lat, lng } : { ...KIT_UNI };
+      if (!isInKarlsruhe) showStatus('Using mock location: KIT University, Karlsruhe');
+      initMap();
     },
     () => useMockLocation()
   );
@@ -154,7 +143,7 @@ function initMap() {
   addUserMarker(userLatLng.lat, userLatLng.lng);
   loadRefillPoints();
 }
-// --- Marker Icons ---
+
 const userIcon = L.divIcon({
   className: 'user-marker',
   html: '<span style="font-size:2rem;line-height:1;">🧑</span>',
@@ -173,6 +162,7 @@ const refillIcon = L.divIcon({
 function addUserMarker(lat, lng) {
   L.marker([lat, lng], { icon: userIcon }).addTo(map).bindPopup('You are here').openPopup();
 }
+
 function loadRefillPoints() {
   showStatus(LANGUAGES[lang].loading);
   const query = `
@@ -191,30 +181,47 @@ function loadRefillPoints() {
     .then(data => {
       markerClusterGroup.clearLayers();
       refillPoints = [];
-      data.elements.forEach((point, idx) => {
+
+      data.elements.forEach((point) => {
         if (point.type !== 'node') return;
+
         const lat = point.lat;
-        const lon = point.lon;
+        const lng = point.lon;
         const name = point.tags?.name || LANGUAGES[lang].refillPoints;
-        const dist = getDistance(userLatLng.lat, userLatLng.lng, lat, lon);
-        const marker = L.marker([lat, lon], { icon: refillIcon });
-        marker.on('click', () => selectPoint(idx));
+        const dist = getDistance(userLatLng.lat, userLatLng.lng, lat, lng);
+
+        const refillPoint = { name, lat, lng, tags: point.tags, dist };
+        const marker = L.marker([lat, lng], { icon: refillIcon });
+        marker.on('click', () => {
+          refillPoints.push(refillPoint); // temporarily push to end
+          const idx = refillPoints.length - 1;
+          selectedMarker = idx;
+          showSingleCardIdx = idx;
+          renderCards();
+          map.setView([lat, lng], 16);
+          drawDottedLine(userLatLng, { lat, lng });
+        });
         markerClusterGroup.addLayer(marker);
-        refillPoints.push({ name, lat, lon, tags: point.tags, dist });
+
+        refillPoints.push(refillPoint); // also push for cards
       });
+
       refillPoints.sort((a, b) => a.dist - b.dist);
       renderCards();
       showStatus(refillPoints.length ? `${refillPoints.length} ${LANGUAGES[lang].refillPoints}` : LANGUAGES[lang].noPoints);
     })
-    .catch(() => showStatus(LANGUAGES[lang].error));
+    .catch((err) => {
+      console.error("Overpass API error:", err);
+      showStatus(LANGUAGES[lang].error);
+    });
 }
+
 function renderCards() {
   cardsList.innerHTML = '';
   if (!refillPoints.length) {
     cardsList.innerHTML = `<div style="color:#888;">${LANGUAGES[lang].noPoints}</div>`;
     return;
   }
-  // If a single card is selected, show only that card
   if (showSingleCardIdx !== null) {
     const point = refillPoints[showSingleCardIdx];
     const card = document.createElement('div');
@@ -241,11 +248,10 @@ function renderCards() {
       renderCards();
     };
     cardsList.appendChild(card);
-    // Scroll card into view if needed
     setTimeout(() => card.scrollIntoView({behavior:'smooth',block:'center'}), 0);
     return;
   }
-  // Show all cards
+
   refillPoints.forEach((point, idx) => {
     const card = document.createElement('div');
     card.className = 'refill-card' + (selectedMarker === idx ? ' selected' : '');
@@ -264,7 +270,7 @@ function renderCards() {
     card.onclick = () => {
       selectedMarker = idx;
       showSingleCardIdx = idx;
-      map.setView([point.lat, point.lon], 16);
+      map.setView([point.lat, point.lng], 16);
       drawDottedLine(userLatLng, point);
       renderCards();
     };
@@ -273,18 +279,9 @@ function renderCards() {
   });
 }
 
-// Marker click shows only that card
-function selectPoint(idx) {
-  selectedMarker = idx;
-  showSingleCardIdx = idx;
-  renderCards();
-  const point = refillPoints[idx];
-  map.setView([point.lat, point.lon], 16);
-  drawDottedLine(userLatLng, point);
-}
 function drawDottedLine(from, to) {
   if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
-  routeLine = L.polyline([[from.lat, from.lng], [to.lat, to.lon]], {
+  routeLine = L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
     color: '#2196f3',
     weight: 4,
     opacity: 0.8,
@@ -292,11 +289,13 @@ function drawDottedLine(from, to) {
     className: 'dotted-route'
   }).addTo(map);
 }
+
 function showStatus(msg) {
   statusMessage.textContent = msg;
   statusMessage.style.display = 'block';
   setTimeout(() => { statusMessage.style.display = 'none'; }, 3000);
 }
+
 function getDistance(lat1, lon1, lat2, lon2) {
   const R = 6371e3;
   const φ1 = lat1 * Math.PI/180, φ2 = lat2 * Math.PI/180;
@@ -304,8 +303,40 @@ function getDistance(lat1, lon1, lat2, lon2) {
   const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
   const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
   return R * c;
-} 
-// Register service worker for PWA
+}
+
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('service-worker.js');
-} 
+}
+
+
+let deferredPrompt = null;
+const installBtn = document.getElementById('installBtn');
+
+// Show button if PWA is installable
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  installBtn.style.display = 'block';
+});
+
+// When user clicks the button
+installBtn.addEventListener('click', async () => {
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
+      console.log('User accepted the install prompt');
+      installBtn.style.display = 'none';
+    } else {
+      console.log('User dismissed the install prompt');
+    }
+    deferredPrompt = null;
+  }
+});
+
+// Optional: hide if already installed
+window.addEventListener('appinstalled', () => {
+  console.log('PWA was installed');
+  installBtn.style.display = 'none';
+});
