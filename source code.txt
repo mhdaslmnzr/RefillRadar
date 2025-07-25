@@ -1,0 +1,1076 @@
+-----HTML FILE---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RefillRadar</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#2196f3">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="pwa.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.css" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster/dist/MarkerCluster.Default.css" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Poppins:400,600,700,900&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Waterfall&display=swap" />
+  <link rel="icon" type="image/png" href="logo.png">
+</head>
+<body>
+<div class="app-root">
+  <header class="app-header">
+    <div class="header-content">
+      <img src="logo.png" alt="RefillRadar logo" class="app-logo" width="32" height="32" />
+      <span class="app-title">RefillRadar</span>
+      <div class="language-switch-app" id="langSwitchApp">
+        <button data-lang="en" class="active" aria-label="Switch to English">EN</button>
+        <button data-lang="de" aria-label="Switch to German">DE</button>
+      </div>
+    </div>
+  </header>
+  <main class="main-layout">
+    <section class="map-section">
+      <div id="map" class="map-full" aria-label="Map"></div>
+      <button class="locate-btn" id="locateBtn" title="Locate Me" aria-label="Locate me">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="16" cy="16" r="12" fill="#2196f3" fill-opacity="0.15"/>
+          <circle cx="16" cy="16" r="7" fill="#2196f3" fill-opacity="0.35"/>
+          <circle cx="16" cy="16" r="3.5" fill="#2196f3" stroke="#fff" stroke-width="2"/>
+        </svg>
+      </button>
+    </section>
+    <section class="cards-section">
+      <div class="cards-header">Nearby Refill Points</div>
+      <div class="cards-list" id="cardsList"></div>
+    </section>
+  </main>
+  <div class="status-message" id="statusMessage" role="status"></div>
+</div>
+<button id="installBtn" style="display: none;">Install App</button>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster/dist/leaflet.markercluster.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
+
+----Javascript---
+
+// --- Minimal RefillRadar App (No Onboarding, No Username) ---
+
+let userLatLng = null;
+let map = null;
+let markerClusterGroup = null;
+let refillPoints = [];
+let routeLine = null;
+let selectedMarker = null;
+let showSingleCardIdx = null;
+const KARLSRUHE_BOUNDS = { minLat: 48.9, maxLat: 49.2, minLon: 8.2, maxLon: 8.6 };
+const KIT_UNI = { lat: 49.0128, lng: 8.4178, name: 'KIT University' };
+
+const langSwitchApp = document.getElementById('langSwitchApp');
+const locateBtn = document.getElementById('locateBtn');
+const statusMessage = document.getElementById('statusMessage');
+const cardsList = document.getElementById('cardsList');
+
+const LANGUAGES = {
+  en: {
+    greeting: (time) => `${time}!`,
+    times: [
+      { from: 5, to: 11, text: 'Good morning' },
+      { from: 11, to: 17, text: 'Good afternoon' },
+      { from: 17, to: 22, text: 'Good evening' },
+      { from: 22, to: 24, text: 'Good night' },
+      { from: 0, to: 5, text: 'Good night' }
+    ],
+    locate: 'Locate',
+    refillPoints: 'Nearby Refill Points',
+    distance: 'Distance',
+    noPoints: 'No refill points found',
+    loading: 'Loading...',
+    error: 'Error loading data.'
+  },
+  de: {
+    greeting: (time) => `${time}!`,
+    times: [
+      { from: 5, to: 11, text: 'Guten Morgen' },
+      { from: 11, to: 17, text: 'Guten Tag' },
+      { from: 17, to: 22, text: 'Guten Abend' },
+      { from: 22, to: 24, text: 'Gute Nacht' },
+      { from: 0, to: 5, text: 'Gute Nacht' }
+    ],
+    locate: 'Lokalisieren',
+    refillPoints: 'Wasserstellen in der Nähe',
+    distance: 'Entfernung',
+    noPoints: 'Keine Wasserstellen gefunden',
+    loading: 'Lädt...',
+    error: 'Fehler beim Laden der Daten.'
+  }
+};
+let lang = localStorage.getItem('lang') || 'en';
+
+window.addEventListener('DOMContentLoaded', () => {
+  setThemeByTime();
+  getUserLocationAndInit();
+  langSwitchApp.addEventListener('click', e => {
+    if (e.target.tagName === 'BUTTON' && e.target.dataset.lang) {
+      setLanguage(e.target.dataset.lang);
+      Array.from(langSwitchApp.children).forEach(btn => btn.classList.remove('active'));
+      e.target.classList.add('active');
+    }
+  });
+  locateBtn.addEventListener('click', () => {
+    if (userLatLng && map) map.setView([userLatLng.lat, userLatLng.lng], 15);
+  });
+});
+
+function setLanguage(newLang) {
+  lang = newLang;
+  localStorage.setItem('lang', lang);
+  renderCards();
+}
+
+function setThemeByTime() {
+  const hour = new Date().getHours();
+  if (hour < 7 || hour > 20) {
+    document.body.style.setProperty('--theme-bg', '#1a2233');
+    document.body.style.setProperty('--theme-text', '#ffffff');
+    document.body.style.setProperty('--theme-text-secondary', '#b0b8c1');
+    document.body.style.setProperty('--theme-header', '#232b3b');
+    document.body.style.setProperty('--theme-card', '#2a3441');
+    document.body.style.setProperty('--theme-card-bg', '#2a3441');
+    document.body.style.setProperty('--theme-card-selected', '#1e2a3a');
+    document.body.style.setProperty('--theme-card-border', '#3a4a5a');
+    document.body.style.setProperty('--theme-border', '#3a4a5a');
+    document.body.style.setProperty('--theme-header-bg', '#232b3b');
+    document.body.style.setProperty('--theme-primary', '#64b5f6');
+    document.body.style.setProperty('--theme-secondary', '#90caf9');
+    document.body.style.setProperty('--theme-status-bg', '#2d3748');
+    document.body.style.setProperty('--theme-status-text', '#f7fafc');
+  } else {
+    document.body.style.setProperty('--theme-bg', '#eaf6fb');
+    document.body.style.setProperty('--theme-text', '#222222');
+    document.body.style.setProperty('--theme-text-secondary', '#666666');
+    document.body.style.setProperty('--theme-header', '#ffffff');
+    document.body.style.setProperty('--theme-card', '#ffffff');
+    document.body.style.setProperty('--theme-card-bg', '#f6fbff');
+    document.body.style.setProperty('--theme-card-selected', '#eaf6fb');
+    document.body.style.setProperty('--theme-card-border', '#b3e0ef');
+    document.body.style.setProperty('--theme-border', '#e0e0e0');
+    document.body.style.setProperty('--theme-header-bg', '#f8f9fa');
+    document.body.style.setProperty('--theme-primary', '#2196f3');
+    document.body.style.setProperty('--theme-secondary', '#1769aa');
+    document.body.style.setProperty('--theme-status-bg', '#fff3cd');
+    document.body.style.setProperty('--theme-status-text', '#856404');
+  }
+}
+
+
+
+function getUserLocationAndInit() {
+  if (!navigator.geolocation) {
+    useMockLocation();
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const isInKarlsruhe = lat > KARLSRUHE_BOUNDS.minLat && lat < KARLSRUHE_BOUNDS.maxLat && lng > KARLSRUHE_BOUNDS.minLon && lng < KARLSRUHE_BOUNDS.maxLon;
+      userLatLng = isInKarlsruhe ? { lat, lng } : { ...KIT_UNI };
+      if (!isInKarlsruhe) showStatus('Using mock location: KIT University, Karlsruhe');
+      initMap();
+    },
+    () => useMockLocation()
+  );
+}
+function useMockLocation() {
+  userLatLng = { ...KIT_UNI };
+  showStatus('Using mock location: KIT University, Karlsruhe');
+  initMap();
+}
+function initMap() {
+  if (map) return;
+  map = L.map('map').setView([userLatLng.lat, userLatLng.lng], 15);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+  markerClusterGroup = L.markerClusterGroup();
+  map.addLayer(markerClusterGroup);
+  addUserMarker(userLatLng.lat, userLatLng.lng);
+  loadRefillPoints();
+}
+
+const userIcon = L.divIcon({
+  className: 'user-marker',
+  html: '<span style="font-size:2rem;line-height:1;">🧑</span>',
+  iconSize: [32, 32],
+  iconAnchor: [16, 32],
+  popupAnchor: [0, -32]
+});
+const refillIcon = L.divIcon({
+  className: 'refill-marker',
+  html: '<span style="font-size:2rem;line-height:1;">💧</span>',
+  iconSize: [32, 32],
+  iconAnchor: [16, 32],
+  popupAnchor: [0, -32]
+});
+
+function addUserMarker(lat, lng) {
+  L.marker([lat, lng], { icon: userIcon }).addTo(map).bindPopup('You are here').openPopup();
+}
+
+function loadRefillPoints() {
+  showStatus(LANGUAGES[lang].loading);
+  const query = `
+    [out:json][timeout:25];
+    (
+      node["amenity"="drinking_water"](around:5000,${userLatLng.lat},${userLatLng.lng});
+      node["refill:water"="yes"](around:5000,${userLatLng.lat},${userLatLng.lng});
+    );
+    out body;
+    >;
+    out skel qt;
+  `;
+  const url = "https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(query);
+  fetch(url)
+    .then(res => res.json())
+    .then(data => {
+      markerClusterGroup.clearLayers();
+      refillPoints = [];
+
+      data.elements.forEach((point) => {
+        if (point.type !== 'node') return;
+
+        const lat = point.lat;
+        const lng = point.lon;
+        const name = point.tags?.name || LANGUAGES[lang].refillPoints;
+        const dist = getDistance(userLatLng.lat, userLatLng.lng, lat, lng);
+
+        const refillPoint = { name, lat, lng, tags: point.tags, dist };
+        const marker = L.marker([lat, lng], { icon: refillIcon });
+        marker.on('click', () => {
+          refillPoints.push(refillPoint); // temporarily push to end
+          const idx = refillPoints.length - 1;
+          selectedMarker = idx;
+          showSingleCardIdx = idx;
+          renderCards();
+          map.setView([lat, lng], 16);
+          drawDottedLine(userLatLng, { lat, lng });
+        });
+        markerClusterGroup.addLayer(marker);
+
+        refillPoints.push(refillPoint); // also push for cards
+      });
+
+      refillPoints.sort((a, b) => a.dist - b.dist);
+      renderCards();
+      showStatus(refillPoints.length ? `${refillPoints.length} ${LANGUAGES[lang].refillPoints}` : LANGUAGES[lang].noPoints);
+    })
+    .catch((err) => {
+      console.error("Overpass API error:", err);
+      showStatus(LANGUAGES[lang].error);
+    });
+}
+
+function renderCards() {
+  cardsList.innerHTML = '';
+  if (!refillPoints.length) {
+    cardsList.innerHTML = `<div style="color:#888;">${LANGUAGES[lang].noPoints}</div>`;
+    return;
+  }
+  if (showSingleCardIdx !== null) {
+    const point = refillPoints[showSingleCardIdx];
+    const card = document.createElement('div');
+    card.className = 'refill-card selected';
+    card.tabIndex = 0;
+    card.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <div class="card-title">${point.name || 'Refill Point'}</div>
+        <button class="close-details" aria-label="Close">&times;</button>
+      </div>
+      <div class="card-distance"><b>${LANGUAGES[lang].distance}:</b> ${Math.round(point.dist)} m</div>
+      <div class="card-tags">
+        <b>Type:</b> ${point.tags?.amenity === 'drinking_water' ? 'Drinking Water' : 'Refill'}<br>
+        ${point.tags?.fountain ? `<b>Fountain:</b> ${point.tags.fountain}` : ''}
+        ${point.tags?.fee ? `<b>Fee:</b> ${point.tags.fee}` : ''}
+        ${point.tags?.operator ? `<b>Operator:</b> ${point.tags.operator}` : ''}
+        ${point.tags?.wheelchair ? `<b>Wheelchair:</b> ${point.tags.wheelchair}` : ''}
+      </div>
+    `;
+    card.querySelector('.close-details').onclick = () => {
+      showSingleCardIdx = null;
+      selectedMarker = null;
+      if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+      renderCards();
+    };
+    cardsList.appendChild(card);
+    setTimeout(() => card.scrollIntoView({behavior:'smooth',block:'center'}), 0);
+    return;
+  }
+
+  refillPoints.forEach((point, idx) => {
+    const card = document.createElement('div');
+    card.className = 'refill-card' + (selectedMarker === idx ? ' selected' : '');
+    card.tabIndex = 0;
+    card.innerHTML = `
+      <div class="card-title">${point.name || 'Refill Point'}</div>
+      <div class="card-distance"><b>${LANGUAGES[lang].distance}:</b> ${Math.round(point.dist)} m</div>
+      <div class="card-tags">
+        <b>Type:</b> ${point.tags?.amenity === 'drinking_water' ? 'Drinking Water' : 'Refill'}<br>
+        ${point.tags?.fountain ? `<b>Fountain:</b> ${point.tags.fountain}` : ''}
+        ${point.tags?.fee ? `<b>Fee:</b> ${point.tags.fee}` : ''}
+        ${point.tags?.operator ? `<b>Operator:</b> ${point.tags.operator}` : ''}
+        ${point.tags?.wheelchair ? `<b>Wheelchair:</b> ${point.tags.wheelchair}` : ''}
+      </div>
+    `;
+    card.onclick = () => {
+      selectedMarker = idx;
+      showSingleCardIdx = idx;
+      map.setView([point.lat, point.lng], 16);
+      drawDottedLine(userLatLng, point);
+      renderCards();
+    };
+    card.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') card.onclick(); };
+    cardsList.appendChild(card);
+  });
+}
+
+function drawDottedLine(from, to) {
+  if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+  routeLine = L.polyline([[from.lat, from.lng], [to.lat, to.lng]], {
+    color: '#2196f3',
+    weight: 4,
+    opacity: 0.8,
+    dashArray: '6, 8',
+    className: 'dotted-route'
+  }).addTo(map);
+}
+
+function showStatus(msg) {
+  statusMessage.textContent = msg;
+  statusMessage.style.display = 'block';
+  setTimeout(() => { statusMessage.style.display = 'none'; }, 3000);
+}
+
+function getDistance(lat1, lon1, lat2, lon2) {
+  const R = 6371e3;
+  const φ1 = lat1 * Math.PI/180, φ2 = lat2 * Math.PI/180;
+  const Δφ = (lat2-lat1) * Math.PI/180, Δλ = (lon2-lon1) * Math.PI/180;
+  const a = Math.sin(Δφ/2)**2 + Math.cos(φ1)*Math.cos(φ2)*Math.sin(Δλ/2)**2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  return R * c;
+}
+
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('service-worker.js');
+}
+
+
+let deferredPrompt = null;
+const installBtn = document.getElementById('installBtn');
+
+// Show button if PWA is installable
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  installBtn.style.display = 'block';
+});
+
+// When user clicks the button
+installBtn.addEventListener('click', async () => {
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
+      console.log('User accepted the install prompt');
+      installBtn.style.display = 'none';
+    } else {
+      console.log('User dismissed the install prompt');
+    }
+    deferredPrompt = null;
+  }
+});
+
+// Optional: hide if already installed
+window.addEventListener('appinstalled', () => {
+  console.log('PWA was installed');
+  installBtn.style.display = 'none';
+});
+
+
+----CSS---
+@import url('https://fonts.googleapis.com/css2?family=Quicksand:wght@400;600&display=swap');
+
+:root {
+  --color-primary: #3bb2d0;
+  --color-secondary: #1e90a6;
+  --color-accent: #6ee7b7;
+  --color-bg: #e6f7fa;
+  --color-bg-dark: #1a2233;
+  --color-text: #222;
+  --color-text-light: #fff;
+  --color-card: #fff;
+  --color-card-dark: #232b3b;
+  --color-border: #b3e0ef;
+  --color-border-dark: #2c3a4d;
+  --color-shadow: rgba(59,178,208,0.08);
+  --theme-switch-bg: #fff;
+  --theme-switch-border: #b3e0ef;
+  --theme-switch-text: #2196f3;
+  --theme-switch-active-bg: #2196f3;
+  --theme-switch-active-text: #fff;
+  --theme-switch-active-border: #2196f3;
+}
+
+body, html {
+  margin: 0;
+  padding: 0;
+  font-family: 'Poppins', Arial, sans-serif;
+  background: var(--theme-bg, #eaf6fb);
+  color: var(--theme-text, #222);
+  min-height: 100vh;
+  transition: background 0.3s, color 0.3s;
+  box-sizing: border-box;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+body.dark, body[style*='--theme-bg: #1a2233'] {
+  --theme-switch-bg: #232b3b;
+  --theme-switch-border: #3a4a5a;
+  --theme-switch-text: #64b5f6;
+  --theme-switch-active-bg: #64b5f6;
+  --theme-switch-active-text: #232b3b;
+  --theme-switch-active-border: #64b5f6;
+}
+.app-root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+.app-header {
+  width: 100vw;
+  background: var(--theme-header, #fff);
+  padding: 0;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  max-width: 100vw;
+  overflow-x: hidden;
+  border-bottom: 1.5px solid var(--theme-border, #e0e0e0);
+  min-height: 56px;
+  margin: 0;
+}
+.header-content {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 20px 8px 20px;
+  box-sizing: border-box;
+}
+.greeting {
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  word-break: break-word;
+  flex: 1 1 auto;
+}
+.language-switch-app {
+  grid-column: 3;
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 0;
+}
+.language-switch-app button {
+  background: var(--theme-switch-bg, #fff);
+  border: 1px solid var(--theme-switch-border, #b3e0ef);
+  color: var(--theme-switch-text, #2196f3);
+  border-radius: 8px;
+  padding: 4px 12px;
+  font-size: 1rem;
+  cursor: pointer;
+  opacity: 0.8;
+  transition: background 0.2s, color 0.2s;
+}
+.language-switch-app button.active {
+  background: var(--theme-switch-active-bg, #2196f3);
+  color: var(--theme-switch-active-text, #fff);
+  opacity: 1;
+  border: 1.5px solid var(--theme-switch-active-border, #2196f3);
+}
+.main-layout {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: calc(100vh - 56px);
+  max-width: 100vw;
+  box-sizing: border-box;
+  overflow-x: hidden;
+  background: var(--theme-bg, #eaf6fb);
+}
+.map-section {
+  flex: 1 1 60%;
+  min-width: 0;
+  position: relative;
+  background: var(--theme-bg, #eaf6fb);
+  box-sizing: border-box;
+  border-bottom: none;
+  margin: 0;
+  padding: 0;
+}
+#map, .map-full {
+  width: 100%;
+  height: 100%;
+  min-height: 400px;
+  position: relative;
+  z-index: 1;
+  border-radius: 0 0 0 0;
+  box-sizing: border-box;
+}
+.app-logo {
+  grid-column: 1;
+  justify-self: start;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(33,150,243,0.10);
+  background: none;
+  object-fit: contain;
+}
+.app-title {
+  grid-column: 2;
+  justify-self: center;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--theme-primary, #2196f3);
+  letter-spacing: 0.01em;
+  text-shadow: 0 2px 8px rgba(33,150,243,0.08);
+  display: flex;
+  align-items: center;
+  margin: 0;
+}
+.locate-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  left: auto;
+  bottom: auto;
+  z-index: 101;
+  background: #fff;
+  border: 1.5px solid #b3e0ef;
+  border-radius: 50%;
+  padding: 6px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  color: #2196f3;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(33,150,243,0.10);
+  transition: box-shadow 0.2s, border 0.2s;
+}
+.locate-btn:hover {
+  box-shadow: 0 8px 24px rgba(33,150,243,0.16);
+  border-color: #2196f3;
+}
+.locate-btn svg {
+  display: block;
+}
+.cards-section {
+  flex: 1 1 40%;
+  min-width: 320px;
+  max-width: 420px;
+  background: var(--theme-card, #fff);
+  border-left: 1.5px solid var(--theme-border, #e0e0e0);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  box-shadow: 0 0 24px rgba(33,150,243,0.04);
+  color: var(--theme-text, #222);
+  box-sizing: border-box;
+  height: 100%;
+  max-height: 100vh;
+  border-top: none;
+  margin: 0;
+}
+.cards-header {
+  font-size: 1.1rem;
+  font-weight: 600;
+  padding: 18px 24px 10px 24px;
+  border-bottom: 1px solid var(--theme-border, #e0e0e0);
+  background: var(--theme-header-bg, #f8f9fa);
+  color: var(--theme-text, #222);
+  box-sizing: border-box;
+  flex-shrink: 0;
+  margin: 0;
+}
+.cards-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 18px 18px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--theme-text, #222);
+  box-sizing: border-box;
+  min-height: 0;
+  max-height: 320px; /* Show only 2 cards at a time, each ~150px tall */
+  margin: 0;
+  background: var(--theme-card, #fff);
+}
+.refill-card {
+  background: var(--theme-card-bg, #f6fbff);
+  border: 1px solid var(--theme-card-border, #b3e0ef);
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 2px 8px rgba(33,150,243,0.04);
+  cursor: pointer;
+  transition: box-shadow 0.2s, border 0.2s, background 0.3s;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--theme-text, #222);
+  box-sizing: border-box;
+  word-break: break-word;
+}
+.refill-card.selected {
+  border: 2px solid #2196f3;
+  background: var(--theme-card-selected, #eaf6fb);
+  box-shadow: 0 4px 16px rgba(33,150,243,0.08);
+}
+.refill-card .card-title {
+  font-size: 1.08rem;
+  font-weight: 600;
+  color: var(--theme-primary, #2196f3);
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+.refill-card .card-distance {
+  color: var(--theme-secondary, #1769aa);
+  font-size: 0.98rem;
+  font-weight: 500;
+}
+.refill-card .card-tags {
+  font-size: 0.92rem;
+  color: var(--theme-text-secondary, #444);
+  margin-top: 4px;
+  word-break: break-word;
+}
+.status-message {
+  position: fixed;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--theme-status-bg, #fff3cd);
+  color: var(--theme-status-text, #856404);
+  padding: 8px 18px;
+  border-radius: 20px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  z-index: 100;
+  font-size: 1rem;
+  display: none;
+  box-sizing: border-box;
+}
+/* Dotted line for navigation */
+.leaflet-interactive.dotted-route {
+  stroke-dasharray: 6, 8;
+  stroke: #2196f3;
+  stroke-width: 4;
+  opacity: 0.8;
+}
+@media (max-width: 900px) {
+  .header-content {
+    min-height: 48px;
+    padding: 6px 8px 6px 8px;
+  }
+  .app-logo {
+    width: 28px;
+    height: 28px;
+  }
+  .app-title {
+    font-size: 1.08rem;
+  }
+  .cards-list {
+    max-height: 220px;
+  }
+  .app-header {
+    flex-direction: column;
+    align-items: flex-start;
+    padding: 10px 8px 6px 8px;
+    font-size: 1.08rem;
+    gap: 8px;
+    max-width: 100vw;
+    word-break: break-word;
+  }
+  .greeting {
+    font-size: 1.05rem;
+    width: 100%;
+    margin-bottom: 4px;
+  }
+  .language-switch-app {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+  .app-title {
+    font-size: 1.08rem;
+  }
+  .locate-btn {
+    width: 44px;
+    height: 44px;
+    padding: 6px;
+    bottom: 12px;
+    right: 12px;
+  }
+}
+@media (max-width: 600px) {
+  .header-content {
+    min-height: 40px;
+    padding: 4px 4vw 4px 4vw;
+  }
+  .app-logo {
+    width: 24px;
+    height: 24px;
+  }
+  .app-title {
+    font-size: 1rem;
+  }
+  .cards-list {
+    max-height: 150px;
+  }
+  .cards-header {
+    padding: 12px 4vw 8px 4vw;
+    font-size: 1rem;
+  }
+  .cards-list {
+    padding: 10px 2vw 10px 2vw;
+    gap: 10px;
+    max-height: 36vh;
+  }
+  .refill-card {
+    padding: 10px 2vw;
+    font-size: 0.98rem;
+  }
+  .app-title {
+    font-size: 1rem;
+  }
+  .locate-btn {
+    width: 40px;
+    height: 40px;
+    padding: 4px;
+    bottom: 8px;
+    right: 8px;
+  }
+} 
+@media (max-width: 700px) {
+  .main-layout {
+    flex-direction: column;
+    height: 100vh;
+    min-height: 0;
+    max-width: 100vw;
+    overflow: hidden;
+    position: relative;
+  }
+  .map-section {
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    height: 100%;
+    position: relative;
+    background: var(--theme-bg, #eaf6fb);
+    z-index: 1;
+    margin: 0;
+    padding: 0;
+  }
+  .cards-section {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    background: var(--theme-card, #fff);
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -4px 24px rgba(33,150,243,0.10);
+    border-left: none;
+    border-top: 1.5px solid var(--theme-border, #e0e0e0);
+    min-height: 120px;
+    max-height: 45vh;
+    height: auto;
+    width: 100vw;
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    padding: 0 0 8px 0;
+  }
+  .cards-header {
+    border-radius: 18px 18px 0 0;
+    padding: 14px 24px 8px 24px;
+    font-size: 1.08rem;
+    background: var(--theme-header-bg, #f8f9fa);
+    border-bottom: 1px solid var(--theme-border, #e0e0e0);
+    margin: 0;
+  }
+  .cards-list {
+    max-height: 30vh;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 10px 10px 0 10px;
+    background: transparent;
+    gap: 12px;
+    margin: 0;
+  }
+  .refill-card {
+    font-size: 0.98rem;
+    padding: 12px 10px;
+    border-radius: 12px;
+  }
+  .app-header {
+    min-height: 44px;
+    padding: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    border-bottom: 1.5px solid var(--theme-border, #e0e0e0);
+    background: var(--theme-header, #fff);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    margin: 0;
+  }
+  .header-content {
+    min-height: 44px;
+    padding: 4px 8px 4px 8px;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .app-logo {
+    width: 24px;
+    height: 24px;
+  }
+  .app-title {
+    font-size: 1.08rem;
+  }
+  .language-switch-app {
+    gap: 6px;
+  }
+  .locate-btn {
+    width: 40px;
+    height: 40px;
+    padding: 4px;
+    bottom: 80px;
+    right: 12px;
+  }
+} 
+.cards-section {
+  box-shadow: 0 -4px 24px rgba(33,150,243,0.10);
+  border-radius: 18px 18px 18px 18px;
+  margin: 0 12px 0 12px;
+  left: 0;
+  right: 0;
+  width: auto;
+  max-width: calc(100vw - 24px);
+}
+@media (max-width: 700px) {
+  .cards-section {
+    margin: 0 8px 0 8px;
+    max-width: calc(100vw - 16px);
+  }
+}
+.app-title {
+  font-family: 'Waterfall', cursive;
+  font-size: 2.4rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  color: var(--theme-primary, #2196f3);
+  text-shadow: 0 2px 8px rgba(33,150,243,0.08);
+  margin: 0;
+  padding: 0 8px;
+  line-height: 1.1;
+}
+.language-switch-app {
+  display: flex;
+  align-items: center;
+  background: #eaf6fb;
+  border-radius: 16px;
+  padding: 0;
+  box-shadow: 0 1px 4px rgba(33,150,243,0.06);
+  font-size: 0.85rem;
+  height: 24px;
+  min-width: 64px;
+  position: relative;
+  width: 64px;
+  overflow: hidden;
+}
+.language-switch-app button {
+  background: none;
+  border: none;
+  color: #2196f3;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-radius: 12px;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  min-width: 20px;
+  width: 50%;
+  height: 24px;
+  outline: none;
+  text-align: center;
+  line-height: 24px;
+  z-index: 2;
+}
+.language-switch-app button.active {
+  background: #2196f3;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(33,150,243,0.10);
+}
+.language-switch-app button:not(.active) {
+  background: transparent;
+  color: #2196f3;
+}
+.language-switch-app button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.language-switch-app button:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.legend-box, .legend-item, .legend-icon, .legend-green, .legend-blue {
+  display: none !important;
+}
+.locate-btn {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  left: auto;
+  bottom: auto;
+  z-index: 101;
+  background: #fff;
+  border: 1.5px solid #b3e0ef;
+  border-radius: 50%;
+  padding: 6px;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.1rem;
+  color: #2196f3;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(33,150,243,0.10);
+  transition: box-shadow 0.2s, border 0.2s;
+}
+@media (max-width: 700px) {
+  .locate-btn {
+    width: 36px;
+    height: 36px;
+    padding: 4px;
+    top: 12px;
+    right: 12px;
+    left: auto;
+    bottom: auto;
+  }
+  .language-switch-app {
+    width: 56px;
+    min-width: 56px;
+    height: 22px;
+    font-size: 0.8rem;
+  }
+  .language-switch-app button {
+    height: 22px;
+    line-height: 22px;
+  }
+} 
+
+#installBtn {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 10px 16px;
+  background-color: var(--theme-primary, #2196f3);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  cursor: pointer;
+  z-index: 1000;
+}
+
+
+---Service Worker for PWA---
+const CACHE_NAME = 'refillradar-v1';
+const ASSETS = [
+  '/',
+  '/index.html',
+  '/styles.css',
+  '/app.js',
+  '/manifest.json',
+  '/pwa.png',
+  '/logo.png',
+  'https://fonts.googleapis.com/css?family=Poppins:400,600,700,900&display=swap',
+  'https://fonts.googleapis.com/css2?family=Waterfall&display=swap'
+];
+self.addEventListener('install', event => {
+  event.waitUntil(
+    caches.open(CACHE_NAME).then(cache => cache.addAll(ASSETS))
+  );
+});
+self.addEventListener('activate', event => {
+  event.waitUntil(
+    caches.keys().then(keys => Promise.all(
+      keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k))
+    ))
+  );
+});
+self.addEventListener('fetch', event => {
+  event.respondWith(
+    caches.match(event.request).then(response => {
+      return response || fetch(event.request).catch(() => {
+        if (event.request.destination === 'image') {
+          return caches.match('/pwa.png');
+        }
+      });
+    })
+  );
+}); 
+
+
+
+---Manifest file---
+{
+  "name": "RefillRadar",
+  "short_name": "RefillRadar",
+  "start_url": ".",
+  "display": "standalone",
+  "background_color": "#2196f3",
+  "theme_color": "#2196f3",
+  "icons": [
+    {
+      "src": "pwa.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "pwa.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+} 
